@@ -374,7 +374,7 @@
 !
 ! Add a histogram plot.
 
-    subroutine add_hist(me, x, label, xlim, ylim, xscale, yscale, bins, normed, cumulative, istat)
+    subroutine add_hist(me, x, label, xlim, ylim, xscale, yscale, bins, normed, cumulative , density, histtype, istat)
 
     class(pyplot),          intent (inout)        :: me           !! pyplot handler
     real(wp), dimension(:), intent (in)           :: x            !! array of data
@@ -393,6 +393,8 @@
     character(len=:), allocatable :: xlimstr          !! xlim values stringified
     character(len=:), allocatable :: ylimstr          !! ylim values stringified
     character(len=:), allocatable :: cumulativestr    !!
+    character(len=:), allocatable :: densitystr       !!
+    character(len=:), allocatable :: histtypestr      !!
     character(len=max_int_len)    :: binsstr          !!
 
     if (allocated(me%str)) then
@@ -413,13 +415,14 @@
         !get optional inputs (if not present, set default value):
         call optional_int_to_string(bins, binsstr, '10')
         call optional_logical_to_string(cumulative, cumulativestr, 'False')
+        call optional_logical_to_string(cumulative, cumulativestr, 'False')
 
         !write the plot statement:
         call me%add_str('ax.hist('//&
                         trim(xname)//','//&
                         'label='//trim(me%raw_str_token)//'"'//trim(label)//'",'//&
                         'bins='//trim(binsstr)//','//&
-                        'cumulative='//trim(cumulativestr)//')') 
+                        'cumulative='//trim(cumulativestr)//')')
 
         !axis limits:
         if (allocated(xlimstr)) call me%add_str('ax.set_xlim('//xlimstr//')')
