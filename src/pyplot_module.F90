@@ -70,6 +70,7 @@
         logical :: axisbelow   = .true.      !! axis below other chart elements
         logical :: tight_layout = .false.    !! tight layout option
         logical :: usetex      = .false.     !! enable LaTeX
+        logical :: hex_data    = .false.     !! write data for plotting as hex-format strings
 
         character(len=:),allocatable :: real_fmt  !! real number formatting
 
@@ -142,7 +143,7 @@
     subroutine initialize(me, grid, xlabel, ylabel, zlabel, title, legend, use_numpy, figsize, &
                           font_size, axes_labelsize, xtick_labelsize, ytick_labelsize, ztick_labelsize, &
                           legend_fontsize, mplot3d, axis_equal, polar, real_fmt, use_oo_api, axisbelow,&
-                          tight_layout, raw_strings, usetex)
+                          tight_layout, raw_strings, usetex, hex_data)
 
     class(pyplot),         intent(inout)        :: me              !! pyplot handler
     logical,               intent(in), optional :: grid            !! activate grid drawing
@@ -169,6 +170,8 @@
     logical,               intent(in), optional :: raw_strings     !! if True, all strings sent to Python are treated as
                                                                    !! raw strings (e.g., r'str'). Default is False.
     logical,               intent(in), optional :: usetex          !! if True, enable LaTeX. (default if false)
+    logical,               intent(in), optional :: hex_data        !! if True, data arrays are written to file as hex-formatted strings.
+                                                                   !! Default is False.
 
     character(len=max_int_len)  :: width_str             !! figure width dummy string
     character(len=max_int_len)  :: height_str            !! figure height dummy string
@@ -197,6 +200,11 @@
         me%use_numpy = use_numpy
     else
         me%use_numpy = .true.
+    end if
+    if (present(hex_data)) then
+        me%hex_data = hex_data
+    else
+        me%hex_data = .false.
     end if
     if (present(use_oo_api)) then
         me%use_oo_api = use_oo_api
@@ -247,7 +255,7 @@
 
     me%str = ''
 
-    call me%add_str('#!/usr/bin/env python')
+    ! call me%add_str('#!/usr/bin/env python')
     call me%add_str('')
 
     call me%add_str('import matplotlib')
@@ -259,6 +267,7 @@
     endif
     if (me%mplot3d) call me%add_str('from mpl_toolkits.mplot3d import Axes3D')
     if (me%use_numpy) call me%add_str('import numpy as np')
+    if (me%hex_data) call me%add_str('import struct as struct')
     call me%add_str('')
 
     call me%add_str('matplotlib.rcParams["font.family"] = "Serif"')
@@ -352,8 +361,8 @@
         if (present(ylim)) call vec_to_string(ylim, me%real_fmt, ylimstr, me%use_numpy)
 
         !convert the arrays to strings:
-        call vec_to_string(x, me%real_fmt, xstr, me%use_numpy)
-        call vec_to_string(y, me%real_fmt, ystr, me%use_numpy)
+        call vec_to_string(x, me%real_fmt, xstr, me%use_numpy, use_hex=me%hex_data)
+        call vec_to_string(y, me%real_fmt, ystr, me%use_numpy, use_hex=me%hex_data)
 
         !get optional inputs (if not present, set default value):
         call optional_int_to_string(markersize, imark, '3')
@@ -1246,18 +1255,39 @@
 !
 ! Real vector to string.
 
-    subroutine vec_to_string(v, fmt, str, use_numpy, is_tuple)
+    subroutine vec_to_string(v, fmt, str, use_numpy, is_tuple, use_hex)
 
     real(wp), dimension(:),        intent(in)  :: v         !! real values
     character(len=*),              intent(in)  :: fmt       !! real format string
     character(len=:), allocatable, intent(out) :: str       !! real values stringified
     logical,                       intent(in)  :: use_numpy !! activate numpy python module usage
     logical,intent(in),optional                :: is_tuple  !! if true [default], use '()', if false use '[]'
+    logical, intent(in), optional              :: use_hex   !! if .true. [default: .false.], ignore fmt and represent
+                                                            !! v as hex strings
 
     integer                     :: i         !! counter
     integer                     :: istat     !! IO status
     character(len=max_real_len) :: tmp       !! dummy string
     logical                     :: tuple
+    logical :: do_hex
+
+    do_hex = .false.; if (present(use_hex)) do_hex = use_hex
+
+    ! ```fortran
+    !    use iso_fortran_env
+    !    real(real32) :: num(2)
+    !    call random_number(num)
+    !    write(*, *) num            ! e.g.: 0.857450485 0.303215265
+    !    write(*, '(*(z8.8))') num  ! e.g.: 3F5B81E03E9B3F08
+    ! end
+    ! ```
+    !
+    ! ```python
+    ! import struct as struct
+    ! datStr = "3F5B81E03E9B3F08"
+    ! struct.unpack('!2f', bytes.fromhex(datStr))
+    ! (0.8574504852294922, 0.30321526527404785)
+    ! ```
 
     if (present(is_tuple)) then
         tuple = is_tuple
@@ -1265,31 +1295,70 @@
         tuple = .false.
     end if
 
-    if (tuple) then
-        str = '('
-    else
-        str = '['
-    end if
+    if (do_hex) then
+        block
+            use, intrinsic :: iso_c_binding, only : c_float, c_double
+            integer, parameter :: nBitsPerByte = 8
+            integer, parameter :: nDigitsPerByte = 2 !! See: https://docs.python.org/3/library/stdtypes.html?highlight=fromhex#bytes.fromhex
+            integer, parameter :: nBytePerNum = storage_size(1._wp) / nBitsPerByte
+            character(:), allocatable :: hexpy
+            character(:), allocatable :: hexf
+            character(:), allocatable :: hexstr
+            integer :: nDigits
 
-    do i=1, size(v)
-        if (fmt=='*') then
-            write(tmp, *, iostat=istat) v(i)
+            str = ''
+
+            nDigits = floor(log10(real(size(v), wp))) + 1
+            allocate(character(nDigits) :: hexpy)
+            write(hexpy, "(i0)") size(v)
+
+            ! For explanation of `hexpy`, see: https://docs.python.org/3/library/struct.html#format-characters
+            select case (storage_size(1._wp))
+                case (storage_size(1._c_float))
+                    hexpy = "!" // hexpy // "f"
+                    allocate(hexf, source="(*(z8.8))")
+                case (storage_size(1._c_double))
+                    hexpy = "!" // hexpy // "d"
+                    allocate(hexf, source="(*(z16.16))")
+                case default
+                    error stop "cannot convert wp to hex data"
+            end select
+
+            nDigits = nDigitsPerByte * nBytePerNum * size(v)
+            allocate(character(nDigits) :: hexstr)
+            write(hexstr, hexf) v
+
+            str = str // "struct.unpack('" // hexpy // "', bytes.fromhex('" // hexstr // "'))"
+
+        end block
+    else
+
+        if (tuple) then
+            str = '('
         else
-            write(tmp, fmt, iostat=istat) v(i)
+            str = '['
         end if
-        if (istat/=0) then
-            write(error_unit,'(A)') 'Error in vec_to_string'
-            str = '****'
-            return
-        end if
-        str = str//trim(adjustl(tmp))
-        if (i<size(v)) str = str // ','
-    end do
 
-    if (tuple) then
-        str = str // ')'
-    else
-        str = str // ']'
+        do i=1, size(v)
+            if (fmt=='*') then
+                write(tmp, *, iostat=istat) v(i)
+            else
+                write(tmp, fmt, iostat=istat) v(i)
+            end if
+            if (istat/=0) then
+                write(error_unit,'(A)') 'Error in vec_to_string'
+                str = '****'
+                return
+            end if
+            str = str//trim(adjustl(tmp))
+            if (i<size(v)) str = str // ','
+        end do
+
+        if (tuple) then
+            str = str // ')'
+        else
+            str = str // ']'
+        end if
     end if
 
     !convert to numpy array if necessary:
@@ -1381,11 +1450,11 @@
             write(error_unit,'(A)') 'Error closing file: '//trim(file)
         else
 
-            if (present(python)) then 
+            if (present(python)) then
                 python_ = trim(python)
-            else 
+            else
                 python_ = python_exe
-            end if 
+            end if
 
             !run the file using python:
             if (index(file,' ')>0) then
